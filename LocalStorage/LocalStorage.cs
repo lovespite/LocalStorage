@@ -2,7 +2,7 @@
 
 namespace LocalStorage;
 
-public abstract class LocalStorage
+public abstract class KeyValueStorage
 {
     public abstract Task SetAsync(string key, string data);
     public abstract Task<string?> GetAsync(string key);

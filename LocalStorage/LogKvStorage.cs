@@ -8,7 +8,7 @@ namespace LocalStorage;
 /// 基于日志追加（Append-Only）的高性能键值存储。
 /// <para>修复了一致性问题和日志重放的健壮性。</para>
 /// </summary>
-public class LogKvStorage : LocalStorage, IDisposable
+public class LogKvStorage : KeyValueStorage, IDisposable
 {
     private readonly string _filePath;
     // 内存索引
