@@ -1,13 +1,13 @@
-﻿using System.Text.Json.Serialization.Metadata;
-
-namespace LocalStorage;
+﻿namespace LocalStorage;
 
 public abstract class KeyValueStorage
 {
+    public abstract string Name { get; }
     public abstract Task SetAsync(string key, string data);
     public abstract Task<string?> GetAsync(string key);
     public abstract Task RemoveAsync(string key);
     public abstract Task ClearAsync();
+    public abstract Task<bool> HasKeyAsync(string key);
 
     public virtual string? Get(string key)
     {
@@ -27,5 +27,10 @@ public abstract class KeyValueStorage
     public virtual void Remove(string key)
     {
         RemoveAsync(key).GetAwaiter().GetResult();
+    }
+
+    public virtual bool HasKey(string key)
+    {
+        return HasKeyAsync(key).GetAwaiter().GetResult();
     }
 }
