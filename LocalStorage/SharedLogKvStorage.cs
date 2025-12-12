@@ -645,8 +645,13 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
                     }
                     else
                     {
-                        var (_, Key, _) = ParsePayloadAndIndex(payload, payloadFileStartOffset: 0); // 我们只需要 Key，因此 Offset 传入 0 即可
-                        keys.Add(Key);
+                        var (OpCode, Key, _) = ParsePayloadAndIndex(payload, payloadFileStartOffset: 0); // 我们只需要 Key，因此 Offset 传入 0 即可
+
+                        if (OpCode == OP_SET)
+                            keys.Add(Key);
+                        else if (OpCode == OP_DEL)
+                            keys.Remove(Key);
+
                         ++counter;
                     }
                 }
