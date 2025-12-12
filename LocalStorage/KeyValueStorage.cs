@@ -14,6 +14,8 @@ public abstract class KeyValueStorage: IDisposable
 
     public abstract void Dispose();
 
+    public abstract bool IsDisposed { get; }
+
     public virtual string? Get(string key)
     {
         return GetAsync(key).GetAwaiter().GetResult();

@@ -3,6 +3,7 @@
 using LocalStorage.Tools;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO.Pipes;
 using System.Runtime.Intrinsics.X86;
 using System.Text;
 using System.Threading.Channels;
@@ -33,9 +34,7 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
 
     private long _lastSyncedPosition = 0;
 
-    private const long LOCK_POSITION = 0;
-    private const long LOCK_LENGTH = 1;
-
+    private const byte OP_NOP = 0;
     private const byte OP_SET = 1;
     private const byte OP_DEL = 2;
 
@@ -43,6 +42,7 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
     private const int HEADER_SIZE = 8;
 
     public long FileSize => DataFileStream?.Length ?? 0;
+    public override bool IsDisposed => _disposed;
 
     public override string Name => Path.GetFileNameWithoutExtension(_dfs.Name);
 
@@ -52,6 +52,7 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
     private readonly struct ValuePointer(long offset)
     {
         public readonly long Offset = offset; // Value 在文件中的起始偏移量（包含长度前缀）
+        public static readonly ValuePointer Null = new(-1);
     }
 
     private SharedLogKvStorage(FileStream dfs, FileStream lfs)
@@ -60,7 +61,7 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
         //_lockFilePath = lfs.Name;
         _dfs = dfs; _lfs = lfs;
         _lastSyncedPosition = 0;
-        _fLock = new FileLock(_lfs.SafeFileHandle);
+        _fLock = new FileLock(_lfs.SafeFileHandle, Name);
 
         // 初始化内存索引
         _memoryIndex = new ConcurrentDictionary<string, ValuePointer>();
@@ -82,7 +83,6 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
 
     public static SharedLogKvStorage Open(string dataFilePath)
     {
-        if (!File.Exists(dataFilePath)) throw new FileNotFoundException("Data file not found.", dataFilePath);
         var dir = Path.GetDirectoryName(dataFilePath);
         if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
 
@@ -169,26 +169,9 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
 
     #region Lock
 
-    private void EnterWriteLock()
-    {
-        //while (true)
-        //{
-        //    try
-        //    {
-        //        _lfs.Lock(LOCK_POSITION, LOCK_LENGTH);
-        //        return;
-        //    }
-        //    catch (IOException) { Thread.Sleep(1); }
-        //}
-        _fLock.LockExclusive();
-    }
+    private void EnterWriteLock() => _fLock.LockExclusive();
 
-    private void ExitWriteLock()
-    {
-        //try { _lfs.Unlock(LOCK_POSITION, LOCK_LENGTH); }
-        //catch { /* ignore */ }
-        _fLock.Unlock();
-    }
+    private void ExitWriteLock() => _fLock.Unlock();
 
     #endregion
 
@@ -217,9 +200,11 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
 
             try
             {
+                int ret;
                 // 读取并校验，获取 Payload 数据块
-                if (!ReadRecordPayload(reader, out var payload))
+                if ((ret = ReadRecordPayload(reader, out var payload)) != RRP_OK)
                 {
+                    LogError($"RRP error at {recordStartPos}: {ret}");
                     // 读取失败，可能是文件被截断，停止同步
                     break;
                 }
@@ -231,11 +216,22 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
                 // 记录开始位置 + Header(8 bytes)
                 long payloadFileStartOffset = recordStartPos + HEADER_SIZE;
 
-                ParsePayloadAndIndex(payload, payloadFileStartOffset);
+                var (OpCode, Key, Pointer) = ParsePayloadAndIndex(payload, payloadFileStartOffset);
+
+                switch (OpCode)
+                {
+                    case OP_DEL:
+                        _memoryIndex.TryRemove(Key, out _);
+                        break;
+                    case OP_SET:
+                        _memoryIndex[Key] = Pointer;
+                        break;
+                    default:
+                        break;
+                }
 
                 _lastSyncedPosition = DataFileStream.Position;
             }
-            catch (EndOfStreamException) { break; }
             catch (Exception ex)
             {
                 LogError($"Sync error at {recordStartPos}: {ex.Message}");
@@ -244,7 +240,18 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
         }
     }
 
-    private void ParsePayloadAndIndex(byte[] payload, long payloadFileStartOffset)
+
+    #endregion
+
+    #region Static Helpers
+
+    /// <summary>
+    /// 解析 Payload 
+    /// </summary>
+    /// <param name="payload"></param>
+    /// <param name="payloadFileStartOffset"></param>
+    /// <returns></returns>
+    private static (byte OpCode, string Key, ValuePointer Pointer) ParsePayloadAndIndex(byte[] payload, long payloadFileStartOffset)
     {
         using var ms = new MemoryStream(payload);
         using var reader = new BinaryReader(ms, Encoding.UTF8);
@@ -260,17 +267,13 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
             long valueOffsetInPayload = ms.Position;
             long absoluteValueOffset = payloadFileStartOffset + valueOffsetInPayload;
 
-            _memoryIndex[key] = new ValuePointer(absoluteValueOffset);
+            // _memoryIndex[key] = new ValuePointer(absoluteValueOffset);
+            return (op, key, new ValuePointer(absoluteValueOffset));
         }
-        else if (op == OP_DEL)
-        {
-            _memoryIndex.TryRemove(key, out _);
-        }
+
+        // _memoryIndex.TryRemove(key, out _);
+        return (op, key, ValuePointer.Null);
     }
-
-    #endregion
-
-    #region Static Helpers
 
     /// <summary>
     /// 写入记录并返回该记录 Payload 中 Value 的绝对文件偏移量
@@ -309,19 +312,25 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
         return null;
     }
 
+    public const int RRP_OK = 0;
+    public const int RRP_E_INVALID_LENGTH = -1;
+    public const int RRP_E_CRC_MISMATCH = -2;
+    public const int RRP_EOF = -3;
+    public const int RRP_E_PAYLOAD_LENGTH_MISMATCH = -4;
+    public const int RRP_E_UNKNOWN = -99;
+
     /// <summary>
     /// 读取记录并校验 CRC，返回原始 Payload 数据
     /// </summary>
-    private static bool ReadRecordPayload(BinaryReader reader, out byte[] payload)
+    private static int ReadRecordPayload(BinaryReader reader, out byte[] payload)
     {
         payload = [];
         int length;
-        try { length = reader.ReadInt32(); } catch (EndOfStreamException) { return false; }
+        try { length = reader.ReadInt32(); } catch (EndOfStreamException) { return RRP_EOF; }
 
         if (length <= 0 || length > MAX_RECORD_PAYLOAD_SIZE)
         {
-            LogError($"Invalid record length: {length}");
-            return false;
+            return RRP_E_INVALID_LENGTH;
         }
 
         uint storedCrc;
@@ -330,18 +339,17 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
             storedCrc = reader.ReadUInt32();
             payload = reader.ReadBytes(length);
         }
-        catch (EndOfStreamException) { return false; }
+        catch (EndOfStreamException) { return RRP_EOF; }
 
-        if (payload.Length != length) return false;
+        if (payload.Length != length) return RRP_E_PAYLOAD_LENGTH_MISMATCH;
 
         var actualCrc = System.IO.Hashing.Crc32.Hash(payload);
         if (BitConverter.ToUInt32(actualCrc) != storedCrc)
         {
-            LogError($"CRC mismatch! Stored: {storedCrc}, Actual: {actualCrc}");
-            return false;
+            return RRP_E_CRC_MISMATCH;
         }
 
-        return true;
+        return RRP_OK;
     }
 
     /// <summary>
@@ -521,7 +529,7 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
         return EnqueueOperationAsync<ICollection<string>>(() =>
         {
             try { SyncDataInternal(); } catch { }
-            return _memoryIndex.Keys.ToList();
+            return [.. _memoryIndex.Keys];
         });
     }
 
@@ -599,7 +607,63 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
                 try { File.Delete(_lfs.Name); } catch { }
             }
             _disposed = true;
+            GC.Collect();
         }
+    }
+
+    public async Task<(long Total, long Valid)> CheckFileValidityAsync(ICollection<(string msg, long ptr, int err)> errorList)
+    {
+        return await EnqueueOperationAsync(() =>
+        {
+            EnterWriteLock();
+            errorList.Clear();
+            var originalPtr = DataFileStream.Position;
+            long counter = 0;
+            var keys = new HashSet<string>();
+
+            try
+            {
+                DataFileStream.Seek(0, SeekOrigin.Begin);
+                using var reader = new BinaryReader(DataFileStream, Encoding.UTF8, leaveOpen: true);
+
+                long ptr = reader.BaseStream.Position;
+                while (true)
+                {
+                    int ret; ptr = reader.BaseStream.Position;
+                    // 读取并校验，获取 Payload 数据块
+                    if ((ret = ReadRecordPayload(reader, out var payload)) != RRP_OK)
+                    {
+                        if (ret == RRP_EOF)
+                        {
+                            // 正常结束
+                            break;
+                        }
+                        else
+                        {
+                            errorList.Add(("RRP-ERR", ptr, ret));
+                        }
+                    }
+                    else
+                    {
+                        var (_, Key, _) = ParsePayloadAndIndex(payload, payloadFileStartOffset: 0); // 我们只需要 Key，因此 Offset 传入 0 即可
+                        keys.Add(Key);
+                        ++counter;
+                    }
+                }
+
+            }
+            catch (Exception ex)
+            {
+                errorList.Add(($"EXCEPTION: {ex.Message}", DataFileStream.Position, RRP_E_UNKNOWN));
+            }
+            finally
+            {
+                DataFileStream.Position = originalPtr;
+                ExitWriteLock();
+            }
+
+            return (counter, keys.Count);
+        });
     }
 
     public override void Dispose()

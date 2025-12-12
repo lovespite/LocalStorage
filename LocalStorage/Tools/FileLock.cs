@@ -59,14 +59,19 @@ public partial class FileLock : IDisposable
         get { lock (@lock) { return _isLocked; } }
     }
 
-    public FileLock(SafeFileHandle handle)
+    public string Name { get; }
+
+    public FileLock(SafeFileHandle handle, string name)
     {
         ArgumentNullException.ThrowIfNull(handle);
         if (handle.IsInvalid || handle.IsClosed)
             throw new ArgumentException("Handle is invalid or closed.", nameof(handle));
 
         _handle = handle;
+        Name = name;
     }
+
+    public FileLock(SafeFileHandle handle) : this(handle, Guid.NewGuid().ToString("N")) { }
 
     #region Native API
 
