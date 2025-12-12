@@ -169,9 +169,9 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
 
     #region Lock
 
-    private void EnterWriteLock() => _fLock.LockExclusive();
+    //private void EnterWriteLock() => _fLock.LockExclusive(); 
 
-    private void ExitWriteLock() => _fLock.Unlock();
+    //private void ExitWriteLock() => _fLock.Unlock();
 
     #endregion
 
@@ -391,26 +391,23 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
         ArgumentException.ThrowIfNullOrEmpty(key);
         return EnqueueOperationAsync(() =>
         {
-            EnterWriteLock();
-            try
+            using var scopeLock = _fLock.AcquireScope();
+
+            SyncDataInternal();
+            if (DataFileStream is null) throw new InvalidOperationException("Stream closed");
+
+            DataFileStream.Seek(0, SeekOrigin.End);
+
+            // 写入并获取新的指针
+            var ptr = WriteRecord(DataFileStream, OP_SET, key, json);
+            DataFileStream.Flush();
+
+            if (ptr.HasValue)
             {
-                SyncDataInternal();
-                if (DataFileStream is null) throw new InvalidOperationException("Stream closed");
-
-                DataFileStream.Seek(0, SeekOrigin.End);
-
-                // 写入并获取新的指针
-                var ptr = WriteRecord(DataFileStream, OP_SET, key, json);
-                DataFileStream.Flush();
-
-                if (ptr.HasValue)
-                {
-                    _memoryIndex[key] = ptr.Value;
-                }
-
-                _lastSyncedPosition = DataFileStream.Position;
+                _memoryIndex[key] = ptr.Value;
             }
-            finally { ExitWriteLock(); }
+
+            _lastSyncedPosition = DataFileStream.Position;
         });
     }
 
@@ -418,25 +415,22 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
     {
         return EnqueueOperationAsync(() =>
         {
-            EnterWriteLock();
-            try
-            {
-                SyncDataInternal();
-                if (DataFileStream is null) throw new InvalidOperationException("Stream closed");
+            using var scopeLock = _fLock.AcquireScope();
 
-                DataFileStream.Seek(0, SeekOrigin.End);
-                foreach (var kvp in data)
+            SyncDataInternal();
+            if (DataFileStream is null) throw new InvalidOperationException("Stream closed");
+
+            DataFileStream.Seek(0, SeekOrigin.End);
+            foreach (var kvp in data)
+            {
+                var ptr = WriteRecord(DataFileStream, OP_SET, kvp.Key, kvp.Value);
+                if (ptr.HasValue)
                 {
-                    var ptr = WriteRecord(DataFileStream, OP_SET, kvp.Key, kvp.Value);
-                    if (ptr.HasValue)
-                    {
-                        _memoryIndex[kvp.Key] = ptr.Value;
-                    }
+                    _memoryIndex[kvp.Key] = ptr.Value;
                 }
-                DataFileStream.Flush();
-                _lastSyncedPosition = DataFileStream.Position;
             }
-            finally { ExitWriteLock(); }
+            DataFileStream.Flush();
+            _lastSyncedPosition = DataFileStream.Position;
         });
     }
 
@@ -445,20 +439,39 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
         return EnqueueOperationAsync(() =>
         {
             if (!_memoryIndex.ContainsKey(key)) return;
-            EnterWriteLock();
-            try
+
+            using var scopeLock = _fLock.AcquireScope();
+
+            SyncDataInternal();
+            if (DataFileStream is null) throw new InvalidOperationException("Stream closed");
+
+            DataFileStream.Seek(0, SeekOrigin.End);
+            WriteRecord(DataFileStream, OP_DEL, key, null);
+            DataFileStream.Flush();
+
+            _memoryIndex.TryRemove(key, out _);
+            _lastSyncedPosition = DataFileStream.Position;
+        });
+    }
+
+    public override Task RemoveBatchAsync(ICollection<string> keys)
+    {
+        return EnqueueOperationAsync(() =>
+        {
+            using var scopeLock = _fLock.AcquireScope();
+
+            SyncDataInternal();
+            if (DataFileStream is null) throw new InvalidOperationException("Stream closed");
+
+            DataFileStream.Seek(0, SeekOrigin.End);
+            foreach (var key in keys)
             {
-                SyncDataInternal();
-                if (DataFileStream is null) throw new InvalidOperationException("Stream closed");
-
-                DataFileStream.Seek(0, SeekOrigin.End);
                 WriteRecord(DataFileStream, OP_DEL, key, null);
-                DataFileStream.Flush();
-
                 _memoryIndex.TryRemove(key, out _);
-                _lastSyncedPosition = DataFileStream.Position;
             }
-            finally { ExitWriteLock(); }
+            DataFileStream.Flush();
+
+            _lastSyncedPosition = DataFileStream.Position;
         });
     }
 
@@ -466,16 +479,13 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
     {
         return EnqueueOperationAsync(() =>
         {
-            EnterWriteLock();
-            try
-            {
-                if (DataFileStream is null) throw new InvalidOperationException("Stream closed");
-                DataFileStream.SetLength(0);
-                DataFileStream.Flush();
-                _memoryIndex.Clear();
-                _lastSyncedPosition = 0;
-            }
-            finally { ExitWriteLock(); }
+            using var scopeLock = _fLock.AcquireScope();
+
+            if (DataFileStream is null) throw new InvalidOperationException("Stream closed");
+            DataFileStream.SetLength(0);
+            DataFileStream.Flush();
+            _memoryIndex.Clear();
+            _lastSyncedPosition = 0;
         });
     }
 
@@ -483,7 +493,8 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
     {
         return EnqueueOperationAsync(() =>
         {
-            try { SyncDataInternal(); } catch { }
+            using var scopeLock = _fLock.AcquireScope();
+            SyncDataInternal();
 
             if (_memoryIndex.TryGetValue(key, out var ptr))
             {
@@ -498,7 +509,9 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
     {
         return EnqueueOperationAsync<ICollection<KeyValuePair<string, string>>>(() =>
         {
-            try { SyncDataInternal(); } catch { }
+            using var scopeLock = _fLock.AcquireScope();
+            SyncDataInternal();
+
             var list = new List<KeyValuePair<string, string>>();
             foreach (var k in keys)
             {
@@ -519,7 +532,9 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
     {
         return EnqueueOperationAsync(() =>
         {
-            try { SyncDataInternal(); } catch { }
+            using var scopeLock = _fLock.AcquireScope();
+            SyncDataInternal();
+
             return _memoryIndex.ContainsKey(key);
         });
     }
@@ -528,8 +543,17 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
     {
         return EnqueueOperationAsync<ICollection<string>>(() =>
         {
-            try { SyncDataInternal(); } catch { }
+            using var scopeLock = _fLock.AcquireScope();
             return [.. _memoryIndex.Keys];
+        });
+    }
+
+    public override async Task<ICollection<string>> FindKeysAsync(string keyword)
+    {
+        return await EnqueueOperationAsync(() =>
+        {
+            using var scopeLock = _fLock.AcquireScope();
+            return _memoryIndex.Keys.Where(k => k.Contains(keyword)).ToList();
         });
     }
 
@@ -539,13 +563,11 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
     {
         await EnqueueOperationAsync(async () =>
         {
-            bool lockTaken = false;
             try
             {
+                using var scopeLock = _fLock.AcquireScope();
                 if (DataFileStream is null) throw new InvalidOperationException("Stream closed");
 
-                EnterWriteLock();
-                lockTaken = true;
                 SyncDataInternal();
 
                 var tempPath = Path.GetTempFileName();
@@ -568,10 +590,6 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
             catch (Exception ex)
             {
                 LogError($"Compact failed: {ex}");
-            }
-            finally
-            {
-                if (lockTaken) ExitWriteLock();
             }
         });
     }
@@ -615,7 +633,7 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
     {
         return await EnqueueOperationAsync(() =>
         {
-            EnterWriteLock();
+            using var scopeLock = _fLock.AcquireScope();
             errorList.Clear();
             var originalPtr = DataFileStream.Position;
             long counter = 0;
@@ -664,7 +682,6 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
             finally
             {
                 DataFileStream.Position = originalPtr;
-                ExitWriteLock();
             }
 
             return (counter, keys.Count);

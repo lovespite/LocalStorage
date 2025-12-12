@@ -8,9 +8,11 @@ public abstract class KeyValueStorage: IDisposable
     public abstract Task<string?> GetAsync(string key);
     public abstract Task<ICollection<KeyValuePair<string, string>>> GetBatchAsync(ICollection<string> keys);
     public abstract Task RemoveAsync(string key);
+    public abstract Task RemoveBatchAsync(ICollection<string> keys);
     public abstract Task ClearAsync();
     public abstract Task<bool> HasKeyAsync(string key);
     public abstract Task<ICollection<string>> GetKeysAsync();
+    public abstract Task<ICollection<string>> FindKeysAsync(string keyword);
 
     public abstract void Dispose();
 
@@ -46,6 +48,11 @@ public abstract class KeyValueStorage: IDisposable
         RemoveAsync(key).GetAwaiter().GetResult();
     }
 
+    public virtual void RemoveBatch(ICollection<string> keys)
+    {
+        RemoveBatchAsync(keys).GetAwaiter().GetResult();
+    }
+
     public virtual bool HasKey(string key)
     {
         return HasKeyAsync(key).GetAwaiter().GetResult();
@@ -54,5 +61,10 @@ public abstract class KeyValueStorage: IDisposable
     public virtual ICollection<string> GetKeys()
     {
         return GetKeysAsync().GetAwaiter().GetResult();
+    }
+
+    public virtual ICollection<string> FindKeys(string keyword)
+    {
+        return FindKeysAsync(keyword).GetAwaiter().GetResult();
     }
 }

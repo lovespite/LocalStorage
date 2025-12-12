@@ -21,6 +21,22 @@ public partial class FileLock : IDisposable
 
     private readonly System.Threading.Lock @lock = new();
 
+    public readonly struct Scope : IDisposable
+    {
+        private readonly FileLock _fileLock;
+        public Scope(FileLock fileLock)
+        {
+            _fileLock = fileLock;
+            _fileLock.LockExclusive();
+        }
+        public void Dispose()
+        {
+            _fileLock.Unlock();
+        }
+    }
+
+    public Scope AcquireScope() => new(this);
+
     /// <summary>
     /// Gets or sets the starting byte offset of the lock.
     /// </summary>
