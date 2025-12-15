@@ -557,8 +557,6 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
         });
     }
 
-    #endregion
-
     public async Task Compact()
     {
         await EnqueueOperationAsync(async () =>
@@ -592,41 +590,6 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
                 LogError($"Compact failed: {ex}");
             }
         });
-    }
-
-    private void CopyToInternal(Stream tempFs)
-    {
-        foreach (var kvp in _memoryIndex)
-        {
-            var key = kvp.Key;
-            var ptr = kvp.Value;
-            var value = ReadValueFromFile(DataFileStream, ptr);
-
-            if (value != null)
-            {
-                WriteRecord(tempFs, OP_SET, key, value);
-            }
-        }
-    }
-
-    protected virtual void Dispose(bool disposing)
-    {
-        if (!_disposed)
-        {
-            if (disposing)
-            {
-                _taskQueue.Writer.TryComplete();
-                _cts.Cancel();
-                try { _workerTask.Wait(TimeSpan.FromSeconds(2)); } catch { }
-                _fLock.Dispose();
-                _cts.Dispose();
-                _dfs.Dispose();
-                _lfs.Dispose();
-                try { File.Delete(_lfs.Name); } catch { }
-            }
-            _disposed = true;
-            GC.Collect();
-        }
     }
 
     public async Task<(long Total, long Valid)> CheckFileValidityAsync(ICollection<(string msg, long ptr, int err)> errorList)
@@ -686,6 +649,43 @@ public class SharedLogKvStorage : KeyValueStorage, IDisposable
 
             return (counter, keys.Count);
         });
+    }
+    
+    #endregion
+
+    private void CopyToInternal(Stream tempFs)
+    {
+        foreach (var kvp in _memoryIndex)
+        {
+            var key = kvp.Key;
+            var ptr = kvp.Value;
+            var value = ReadValueFromFile(DataFileStream, ptr);
+
+            if (value != null)
+            {
+                WriteRecord(tempFs, OP_SET, key, value);
+            }
+        }
+    }
+
+    protected virtual void Dispose(bool disposing)
+    {
+        if (!_disposed)
+        {
+            if (disposing)
+            {
+                _taskQueue.Writer.TryComplete();
+                _cts.Cancel();
+                try { _workerTask.Wait(TimeSpan.FromSeconds(2)); } catch { }
+                _fLock.Dispose();
+                _cts.Dispose();
+                _dfs.Dispose();
+                _lfs.Dispose();
+                try { File.Delete(_lfs.Name); } catch { }
+            }
+            _disposed = true;
+            GC.Collect();
+        }
     }
 
     public override void Dispose()
